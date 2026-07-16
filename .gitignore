@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+build/
+dist/
+*.spec.bak
+.venv/
+saida/
+teste_saida/
+modelos_cache/
+cortadoc/models/*.onnx
+nohup.out
