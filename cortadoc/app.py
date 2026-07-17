@@ -406,16 +406,20 @@ class JanelaPrincipal(QMainWindow):
 
     def agrupar(self):
         sel = self._selecionados()
-        if len(sel) < 2:
-            self.status.setText("Selecione 2+ itens (Ctrl+clique) para juntar num PDF.")
+        if not sel:
+            self.status.setText("Selecione 1 ou mais itens para marcar como PDF "
+                                "(Ctrl+clique para juntar vários num só).")
             return
         grupo = self._proximo_grupo
         self._proximo_grupo += 1
         for idx in sel:
             self.itens[idx].grupo = grupo
             self._atualizar_item_visual(idx)
-        self.status.setText(f"PDF {grupo} criado com {len(sel)} páginas "
-                            f"(ordem = ordem da galeria).")
+        if len(sel) == 1:
+            self.status.setText(f"PDF {grupo} criado com 1 página.")
+        else:
+            self.status.setText(f"PDF {grupo} criado com {len(sel)} páginas "
+                                f"(ordem = ordem da galeria).")
 
     def desagrupar(self):
         sel = self._selecionados()
