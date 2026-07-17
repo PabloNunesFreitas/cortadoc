@@ -5,6 +5,9 @@ on:
     tags: ["v*"]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: windows-latest
@@ -20,14 +23,21 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt pyinstaller
 
-      - name: Baixar modelos do DocAligner (cache local para o bundle)
+      - name: Baixar modelo ONNX (embutido no exe)
         run: python scripts/baixar_modelos.py
 
       - name: Build com PyInstaller
         run: pyinstaller cortadoc.spec
 
-      - name: Publicar artifact
+      - name: Publicar artifact (backup)
         uses: actions/upload-artifact@v4
         with:
           name: CortaDoc-windows
           path: dist/CortaDoc.exe
+
+      - name: Publicar Release com o exe (download direto, sem login)
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" dist/CortaDoc.exe --title "CortaDoc ${{ github.ref_name }}" --notes "Corta documentos em fotos e agrupa em PDFs. Baixe o CortaDoc.exe abaixo — não precisa instalar nada, é só executar." --repo "${{ github.repository }}"
