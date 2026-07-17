@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
     QLabel, QListWidget, QListWidgetItem, QFileDialog, QProgressBar,
     QDialog, QDialogButtonBox, QMessageBox, QAbstractItemView, QSpinBox,
+    QScrollArea, QLineEdit, QSplitter,
 )
 
 from cortadoc.core.detector import detectar_cantos
@@ -236,6 +237,99 @@ class EditorCantos(QDialog):
         return (self.cantos / self.escala).astype("float32")
 
 
+class DialogoRevisao(QDialog):
+    """Revisão antes de salvar: páginas grandes à esquerda, nomes editáveis
+    à direita. O usuário vê o que é cada PDF e renomeia sem precisar abrir."""
+
+    LARGURA_PREVIEW = 480
+
+    def __init__(self, pdfs: list[tuple[str, list["DocItem"]]], parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Revisar e nomear PDFs")
+        self.resize(1000, 720)
+        self.pdfs = pdfs          # [(nome, [itens])]
+        self.nomes = [nome for nome, _ in pdfs]
+
+        # --- esquerda: páginas do PDF selecionado, grandes e roláveis ------
+        self.area_paginas = QScrollArea()
+        self.area_paginas.setWidgetResizable(True)
+        self._container = QWidget()
+        self._lay_paginas = QVBoxLayout(self._container)
+        self._lay_paginas.setContentsMargins(8, 8, 8, 8)
+        self.area_paginas.setWidget(self._container)
+
+        # --- direita: lista de PDFs + campo de nome -------------------------
+        self.lista_pdfs = QListWidget()
+        for nome, itens in pdfs:
+            pags = len(itens)
+            self.lista_pdfs.addItem(
+                f"{nome}.pdf  ({pags} pág{'s' if pags > 1 else ''})")
+        self.lista_pdfs.currentRowChanged.connect(self._trocar_pdf)
+
+        self.campo_nome = QLineEdit()
+        self.campo_nome.setPlaceholderText("Nome do PDF (sem .pdf)")
+        self.campo_nome.textEdited.connect(self._nome_editado)
+
+        botoes = QDialogButtonBox()
+        self.btn_salvar = botoes.addButton("Salvar PDFs…",
+                                           QDialogButtonBox.AcceptRole)
+        botoes.addButton("Cancelar", QDialogButtonBox.RejectRole)
+        botoes.accepted.connect(self.accept)
+        botoes.rejected.connect(self.reject)
+
+        direita = QWidget()
+        lay_dir = QVBoxLayout(direita)
+        lay_dir.addWidget(QLabel("PDFs que serão criados:"))
+        lay_dir.addWidget(self.lista_pdfs, stretch=1)
+        lay_dir.addWidget(QLabel("Nome do PDF selecionado:"))
+        lay_dir.addWidget(self.campo_nome)
+        lay_dir.addWidget(botoes)
+
+        split = QSplitter()
+        split.addWidget(self.area_paginas)
+        split.addWidget(direita)
+        split.setSizes([620, 380])
+        lay = QVBoxLayout(self)
+        lay.addWidget(split)
+
+        self._cache_paginas: dict[int, list[QPixmap]] = {}
+        if pdfs:
+            self.lista_pdfs.setCurrentRow(0)
+
+    def _trocar_pdf(self, linha: int):
+        if linha < 0:
+            return
+        self.campo_nome.setText(self.nomes[linha])
+        # limpa previews antigos
+        while self._lay_paginas.count():
+            w = self._lay_paginas.takeAt(0).widget()
+            if w:
+                w.deleteLater()
+        # monta previews (com cache — pixmap grande é caro)
+        if linha not in self._cache_paginas:
+            _, itens = self.pdfs[linha]
+            self._cache_paginas[linha] = [
+                bgr_para_qpixmap(item.imagem_final(), self.LARGURA_PREVIEW)
+                for item in itens]
+        for i, pix in enumerate(self._cache_paginas[linha], 1):
+            rotulo = QLabel()
+            rotulo.setPixmap(pix)
+            rotulo.setAlignment(Qt.AlignHCenter)
+            self._lay_paginas.addWidget(QLabel(f"— página {i} —"))
+            self._lay_paginas.addWidget(rotulo)
+        self._lay_paginas.addStretch()
+
+    def _nome_editado(self, texto: str):
+        linha = self.lista_pdfs.currentRow()
+        if linha < 0:
+            return
+        self.nomes[linha] = texto.strip() or self.nomes[linha]
+        pags = len(self.pdfs[linha][1])
+        self.lista_pdfs.item(linha).setText(
+            f"{texto.strip() or self.nomes[linha]}.pdf  "
+            f"({pags} pág{'s' if pags > 1 else ''})")
+
+
 class JanelaPrincipal(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -430,15 +524,8 @@ class JanelaPrincipal(QMainWindow):
             self._atualizar_item_visual(idx)
         self.status.setText("Itens removidos dos grupos.")
 
-    def gerar_pdfs(self):
-        if not self.itens:
-            return
-        destino = QFileDialog.getExistingDirectory(
-            self, "Pasta de saída dos PDFs", str(Path.home()))
-        if not destino:
-            return
-        destino = Path(destino)
-
+    def _montar_lista_pdfs(self) -> list[tuple[str, list[DocItem]]]:
+        """Monta [(nome_sugerido, itens)] na ordem: grupos, depois soltos."""
         grupos: dict[int, list[DocItem]] = {}
         individuais: list[DocItem] = []
         for item in self.itens:
@@ -446,30 +533,40 @@ class JanelaPrincipal(QMainWindow):
                 individuais.append(item)
             else:
                 grupos.setdefault(item.grupo, []).append(item)
+        pdfs = [(f"documento_{n:02d}", membros)
+                for n, membros in sorted(grupos.items())]
+        pdfs += [(item.rotulo, [item]) for item in individuais]
+        return pdfs
 
+    def gerar_pdfs(self):
+        if not self.itens:
+            return
+
+        # 1. Revisão: ver as páginas grandes e renomear cada PDF.
+        pdfs = self._montar_lista_pdfs()
+        dlg = DialogoRevisao(pdfs, self)
+        if dlg.exec() != QDialog.Accepted:
+            return
+
+        # 2. Só então escolher a pasta.
+        destino = QFileDialog.getExistingDirectory(
+            self, "Pasta de saída dos PDFs", str(Path.home()))
+        if not destino:
+            return
+        destino = Path(destino)
+
+        # 3. Exportar com os nomes escolhidos.
         gerados, falhas = [], []
-        for numero, membros in sorted(grupos.items()):
-            caminho = caminho_sem_colisao(destino, f"documento_{numero:02d}")
+        for nome, (_, membros) in zip(dlg.nomes, pdfs):
+            caminho = caminho_sem_colisao(destino, nome_arquivo_seguro(nome))
             try:
                 exportar_pdf([m.imagem_final() for m in membros], caminho)
                 gerados.append(caminho.name)
-                log.info("PDF grupo %d: %s (%d págs)", numero, caminho.name,
-                         len(membros))
+                log.info("PDF: %s (%d págs)", caminho.name, len(membros))
             except Exception as e:
-                log.error("Falha no PDF do grupo %d: %s\n%s", numero, e,
+                log.error("Falha no PDF %s: %s\n%s", nome, e,
                           traceback.format_exc())
-                falhas.append((f"grupo {numero}", str(e)))
-        for item in individuais:
-            caminho = caminho_sem_colisao(destino,
-                                          nome_arquivo_seguro(item.rotulo))
-            try:
-                exportar_pdf([item.imagem_final()], caminho)
-                gerados.append(caminho.name)
-                log.info("PDF individual: %s", caminho.name)
-            except Exception as e:
-                log.error("Falha no PDF de %s: %s\n%s", item.rotulo, e,
-                          traceback.format_exc())
-                falhas.append((item.rotulo, str(e)))
+                falhas.append((nome, str(e)))
 
         if falhas:
             detalhes = "\n".join(f"• {n}: {m}" for n, m in falhas[:10])
